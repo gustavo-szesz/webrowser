@@ -64,6 +64,9 @@ class URL:
             request += "User-Agent: Webrowser/0.1\r\n"
             request += "Connection: close\r\n"
             request += "\r\n"
+
+            #if request == "POST":
+
             s.send(request.encode("utf8"))
             try:
                 # read raw bytes and decode headers

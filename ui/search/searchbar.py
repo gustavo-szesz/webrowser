@@ -32,6 +32,7 @@ class QtSearchBar(QWidget):
         self.search.setFont(QFont("Arial", 12))
         self.search.setPlaceholderText("Digite uma URL (ex: example.com ou http://example.com)")
 
+
         go = QPushButton("Go")
         go.clicked.connect(self.navigate)
         self.search.returnPressed.connect(self.navigate)
