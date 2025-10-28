@@ -1,8 +1,18 @@
 from PyQt5.QtGui import QFont, QPainter, QFontMetrics
 from PyQt5.QtWidgets import QSizePolicy
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout, QApplication, QLineEdit, QTextEdit, QHBoxLayout, QDialog
-from engine import URL, render_text
+from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtWidgets import QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout, QApplication, QLineEdit, QTextEdit, QHBoxLayout, QDialog, QTextBrowser, QMessageBox
+from engine import URL, load_html, render_text
+from ui.utils.word_layout import WordLayoutWidget
+
+# Try to import QWebEngineView for full HTML+CSS rendering. If absent, keep a flag
+# so we can gracefully disable the feature and show an informative message.
+try:
+    from PyQt5.QtWebEngineWidgets import QWebEngineView
+    WEBENGINE_AVAILABLE = True
+except Exception:
+    QWebEngineView = None
+    WEBENGINE_AVAILABLE = False
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -25,7 +35,7 @@ class MainWindow(QMainWindow):
         header = QLabel("Web Browser (text mode)")
         header.setFont(QFont("Sans", 12))
 
-        self.output = QTextEdit()
+        self.output = QTextBrowser()
         self.output.setReadOnly(True)
         self.output.setFont(QFont("Courier", 10))
 
@@ -67,10 +77,18 @@ class QtSearchBar(QWidget):
         layout_btn = QPushButton("Layout")
         layout_btn.clicked.connect(self.view_layout)
 
+        render_btn = QPushButton("Render")
+        render_btn.clicked.connect(self.view_render)
+        # disable the button if QWebEngineView is not available
+        render_btn.setEnabled(WEBENGINE_AVAILABLE)
+        if not WEBENGINE_AVAILABLE:
+            render_btn.setToolTip("Install PyQtWebEngine to enable full HTML/CSS rendering")
+
         h.addWidget(self.search)
         h.addWidget(go)
         h.addWidget(source_btn)
         h.addWidget(layout_btn)
+        h.addWidget(render_btn)
 
     def navigate(self):
         text = self.search.text().strip()
@@ -80,10 +98,9 @@ class QtSearchBar(QWidget):
             text = "http://" + text
         try:
             u = URL(text)
-            raw = u.request()
-            rendered = render_text(raw)
+            raw = load_html(text)
             self.last_raw = raw
-            self.output.setPlainText(rendered)
+            self.output.setHtml(raw)
         except Exception as e:
             self.output.setPlainText("Erro: " + str(e))
 
@@ -116,11 +133,32 @@ class QtSearchBar(QWidget):
         dlg.setWindowTitle("Layout Preview")
         dlg.resize(800, 600)
         vbox = QVBoxLayout(dlg)
-        widget = WordLayoutWidget()
+        widget = WordLayoutWidget(dlg)
         widget.setFont(QFont("Arial", 12))
         # pass raw HTML so lex can see <b>/<i> tags
         widget.setText(self.last_raw)
         vbox.addWidget(widget)
+        dlg.exec_()
+
+    def view_render(self):
+        # if we don't have raw HTML yet, try to fetch current url
+        if not self.last_raw:
+            self.navigate()
+            if not self.last_raw:
+                return
+
+        if not WEBENGINE_AVAILABLE:
+            QMessageBox.critical(self, "Error", "PyQtWebEngine is not installed.\nInstall it with: pip install PyQtWebEngine")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Render (HTML+CSS)")
+        dlg.resize(1024, 768)
+        vbox = QVBoxLayout(dlg)
+        web = QWebEngineView(dlg)
+        # Provide a base URL so relative links and resources can resolve if present
+        web.setHtml(self.last_raw, QUrl("http://localhost/"))
+        vbox.addWidget(web)
         dlg.exec_()
 
 
@@ -185,111 +223,3 @@ def lex(body):
     if buffer:
         out.append(Text(buffer))
     return out
-
-
-def layout_text(text, qfont, width, hstep=10, vpad=8):
-    """Layout words from `text` using QFontMetrics.
-
-    Returns a list of tuples: (x, y, word). Arguments:
-    - text: the input string
-    - qfont: QFont instance used for measurement
-    - width: available width in pixels
-    - hstep: left/right margin in pixels
-    - vpad: extra vertical padding multiplier (in pixels)
-
-    Behavior mirrors the tkinter example: words are placed left-to-right,
-    wrapping to the next line when they exceed `width - hstep`.
-    """
-    # Accept either a raw HTML/text string or a list of tokens
-    if isinstance(text, str):
-        tokens = None
-        # lazy import of lex below
-        tokens = lex(text)
-    else:
-        tokens = text
-
-    base_fm = QFontMetrics(qfont)
-    space_w_base = base_fm.horizontalAdvance(' ')
-    cursor_x = hstep
-    # start y at ascent so text draws inside widget
-    line_height = base_fm.height()
-    cursor_y = line_height  # first baseline
-
-    display_list = []
-
-    # state for font modifiers
-    weight = 'normal'
-    style = 'roman'
-
-    for tok in tokens:
-        if isinstance(tok, Text):
-            # split the text token into words
-            for word in tok.text.split():
-                # create a font for this run based on modifiers
-                f = QFont(qfont)
-                f.setBold(weight == 'bold')
-                f.setItalic(style == 'italic')
-                fm_word = QFontMetrics(f)
-                w = fm_word.horizontalAdvance(word)
-
-                # wrap
-                if cursor_x + w > max(hstep + 10, width - hstep):
-                    cursor_y += int(line_height * 1.25) + vpad
-                    cursor_x = hstep
-
-                display_list.append((cursor_x, cursor_y, word, f))
-                cursor_x += w + fm_word.horizontalAdvance(' ')
-
-        elif isinstance(tok, Tag):
-            t = tok.tag
-            # normalize simple tags like 'b', '/b', 'i', '/i'
-            if t == 'i':
-                style = 'italic'
-            elif t == '/i':
-                style = 'roman'
-            elif t == 'b':
-                weight = 'bold'
-            elif t == '/b':
-                weight = 'normal'
-            else:
-                # ignore other tags for layout purposes
-                pass
-
-    return display_list
-
-
-class WordLayoutWidget(QWidget):
-    """Widget that visualizes word layout calculated with `layout_text`.
-
-    Usage: create, call `setText(text)` and show. It uses the widget's font by default.
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._text = ''
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-    def setText(self, text: str):
-        self._text = text
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setFont(self.font())
-        width = max(100, self.width())
-        items = layout_text(self._text, self.font(), width)
-        # draw each word at computed baseline position using its per-word font
-        for item in items:
-            # items are (x, y, word, font)
-            if len(item) == 4:
-                x, y, word, font = item
-            else:
-                x, y, word = item
-                font = self.font()
-            painter.setFont(font)
-            painter.drawText(x, y, word)
-
-        # optionally draw a guide line at bottom
-        painter.setPen(painter.pen())
-        painter.end()
-
-
